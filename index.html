@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chống Cắn Móng Tay</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #181b22; --text: #e8eaf0; --muted: #9aa0ad;
+    --accent: #3b82f6; --ok: #22c55e; --danger: #ef4444; --border: #2a2f3a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; align-items: center; min-height: 100vh;
+    padding: 24px 16px; transition: background .1s;
+  }
+  body.alarm { animation: flash .35s infinite alternate; }
+  @keyframes flash { from { background: var(--bg); } to { background: #7f1d1d; } }
+  h1 { margin: 0 0 4px; font-size: 26px; }
+  p.sub { margin: 0 0 20px; color: var(--muted); }
+  .stage {
+    position: relative; width: 100%; max-width: 720px; aspect-ratio: 4 / 3;
+    background: #000; border-radius: 14px; overflow: hidden; border: 3px solid var(--border);
+  }
+  .stage.alarm { border-color: var(--danger); }
+  video, canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+  .status {
+    position: absolute; top: 12px; left: 12px; padding: 6px 12px; border-radius: 999px;
+    font-weight: 600; font-size: 14px; background: rgba(0,0,0,.6);
+  }
+  .status.ok { color: var(--ok); } .status.danger { color: #fff; background: var(--danger); }
+  .overlay-msg {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 44px; font-weight: 800; color: #fff; text-shadow: 0 2px 12px #000;
+    pointer-events: none; opacity: 0;
+  }
+  .stage.alarm .overlay-msg { opacity: 1; }
+  .controls {
+    width: 100%; max-width: 720px; margin-top: 16px; display: grid; gap: 14px;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 16px;
+  }
+  label { display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: var(--muted); }
+  label span b { color: var(--text); }
+  input[type=range] { width: 100%; }
+  button {
+    font-size: 16px; font-weight: 600; padding: 12px 18px; border-radius: 10px; border: 0;
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  button.secondary { background: #374151; }
+  .stats { display: flex; gap: 24px; align-items: center; font-size: 14px; color: var(--muted); }
+  .stats b { font-size: 22px; color: var(--text); display: block; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+</style>
+</head>
+<body>
+  <h1>🖐️ Chống Cắn Móng Tay</h1>
+  <p class="sub">Đưa tay lên miệng → báo động. Bỏ tay xuống → tắt.</p>
+
+  <div class="stage" id="stage">
+    <video id="video" playsinline muted></video>
+    <canvas id="canvas"></canvas>
+    <div class="status" id="status">Chưa bắt đầu</div>
+    <div class="overlay-msg">🚨 BỎ TAY XUỐNG! 🚨</div>
+  </div>
+
+  <div class="controls">
+    <div class="row" style="grid-column: 1 / -1;">
+      <button id="startBtn">▶ Bắt đầu</button>
+      <button id="stopBtn" class="secondary" disabled>■ Dừng</button>
+      <button id="testBtn" class="secondary">🔊 Thử âm thanh</button>
+      <label style="flex-direction:row;align-items:center;gap:6px;">
+        <input type="checkbox" id="drawToggle" checked> Hiện điểm nhận diện
+      </label>
+    </div>
+    <label>
+      <span>Độ nhạy (khoảng cách tay–miệng): <b id="sensVal"></b></span>
+      <input type="range" id="sens" min="0.15" max="0.8" step="0.01" value="0.35">
+    </label>
+    <label>
+      <span>Âm lượng: <b id="volVal"></b></span>
+      <input type="range" id="vol" min="0" max="1" step="0.05" value="1">
+    </label>
+    <div class="stats" style="grid-column: 1 / -1;">
+      <div><b id="count">0</b>lần bị bắt hôm nay</div>
+      <div><b id="fps">–</b>FPS</div>
+    </div>
+  </div>
+
+<script type="module">
+import { FilesetResolver, FaceLandmarker, HandLandmarker }
+  from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+const $ = (id) => document.getElementById(id);
+const video = $("video"), canvas = $("canvas"), ctx = canvas.getContext("2d");
+const stage = $("stage"), statusEl = $("status");
+
+let audioCtx, master, sirenOsc, sirenOsc2, lfo;
+
+// ---------- Settings ----------
+const sens = $("sens"), vol = $("vol");
+const showSens = () => $("sensVal").textContent = (+sens.value).toFixed(2);
+const showVol = () => { $("volVal").textContent = Math.round(vol.value * 100) + "%"; if (master) master.gain.value = +vol.value; };
+sens.oninput = showSens; vol.oninput = showVol; showSens(); showVol();
+
+const todayKey = "nailbite-" + new Date().toISOString().slice(0, 10);
+let count = 0;
+try { count = +localStorage.getItem(todayKey) || 0; } catch {}
+$("count").textContent = count;
+
+// ---------- Alarm sound (Web Audio siren, no file needed) ----------
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const comp = audioCtx.createDynamicsCompressor();
+  master = audioCtx.createGain();
+  master.gain.value = +vol.value;
+  master.connect(comp).connect(audioCtx.destination);
+}
+function startSiren() {
+  initAudio();
+  if (sirenOsc) return;
+  const g = audioCtx.createGain();
+  g.gain.value = 0.9;
+  sirenOsc = audioCtx.createOscillator();  sirenOsc.type = "sawtooth";
+  sirenOsc2 = audioCtx.createOscillator(); sirenOsc2.type = "square";
+  sirenOsc.frequency.value = 900; sirenOsc2.frequency.value = 905;
+  // LFO sweeps the pitch between ~600Hz and ~1200Hz like a siren
+  lfo = audioCtx.createOscillator(); lfo.type = "triangle"; lfo.frequency.value = 3;
+  const lfoGain = audioCtx.createGain(); lfoGain.gain.value = 300;
+  lfo.connect(lfoGain); lfoGain.connect(sirenOsc.frequency); lfoGain.connect(sirenOsc2.frequency);
+  sirenOsc.connect(g); sirenOsc2.connect(g); g.connect(master);
+  sirenOsc.start(); sirenOsc2.start(); lfo.start();
+  sirenOsc._g = g;
+}
+function stopSiren() {
+  if (!sirenOsc) return;
+  const g = sirenOsc._g, t = audioCtx.currentTime;
+  g.gain.setTargetAtTime(0, t, 0.02);
+  const [a, b, c] = [sirenOsc, sirenOsc2, lfo];
+  setTimeout(() => { a.stop(); b.stop(); c.stop(); }, 120);
+  sirenOsc = sirenOsc2 = lfo = null;
+}
+
+$("testBtn").onclick = () => {
+  startSiren();
+  setTimeout(() => { if (!alarmOn) stopSiren(); }, 1000);
+};
+
+// ---------- Models ----------
+let faceLm, handLm;
+async function loadModels() {
+  const fileset = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  const base = "https://storage.googleapis.com/mediapipe-models/";
+  [faceLm, handLm] = await Promise.all([
+    FaceLandmarker.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: base + "face_landmarker/face_landmarker/float16/1/face_landmarker.task", delegate: "GPU" },
+      runningMode: "VIDEO", numFaces: 1,
+    }),
+    HandLandmarker.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: base + "hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task", delegate: "GPU" },
+      runningMode: "VIDEO", numHands: 2,
+      minHandDetectionConfidence: 0.4, minHandPresenceConfidence: 0.4, minTrackingConfidence: 0.4,
+    }),
+  ]);
+}
+
+// ---------- Detection loop ----------
+const FINGERTIPS = [4, 8, 12, 16, 20];       // thumb, index, middle, ring, pinky tips
+const FINGER_DIP = [3, 7, 11, 15, 19];       // joint just below the tips
+const MOUTH = [13, 14, 61, 291, 0, 17];      // inner lips, corners, outer lips
+const ON_FRAMES = 4;    // frames in a row near mouth before alarm (avoids false triggers)
+const OFF_FRAMES = 6;   // frames in a row away before alarm stops
+
+let running = false, stream, rafId, lastVideoTime = -1;
+let nearStreak = 0, farStreak = 0, alarmOn = false;
+let fpsFrames = 0, fpsT = performance.now();
+
+function setAlarm(on) {
+  if (on === alarmOn) return;
+  alarmOn = on;
+  document.body.classList.toggle("alarm", on);
+  stage.classList.toggle("alarm", on);
+  if (on) {
+    startSiren();
+    count++; $("count").textContent = count;
+    try { localStorage.setItem(todayKey, count); } catch {}
+  } else stopSiren();
+}
+
+function setStatus(text, cls) { statusEl.textContent = text; statusEl.className = "status " + (cls || ""); }
+
+function loop() {
+  if (!running) return;
+  rafId = requestAnimationFrame(loop);
+  if (video.readyState < 2 || video.currentTime === lastVideoTime) return;
+  lastVideoTime = video.currentTime;
+
+  const now = performance.now();
+  const face = faceLm.detectForVideo(video, now);
+  const hands = handLm.detectForVideo(video, now);
+
+  if (canvas.width !== video.videoWidth) { canvas.width = video.videoWidth; canvas.height = video.videoHeight; }
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  const draw = $("drawToggle").checked;
+
+  let near = false;
+  const fl = face.faceLandmarks?.[0];
+
+  if (!fl) {
+    setStatus("Không thấy khuôn mặt", "");
+  } else {
+    // Mouth center & face scale in pixel space (so distances aren't distorted by aspect ratio)
+    const px = (p) => ({ x: p.x * W, y: p.y * H });
+    const mouthPts = MOUTH.map((i) => px(fl[i]));
+    const mc = { x: (mouthPts[2].x + mouthPts[3].x) / 2, y: (mouthPts[0].y + mouthPts[1].y) / 2 };
+    const faceW = Math.hypot(px(fl[234]).x - px(fl[454]).x, px(fl[234]).y - px(fl[454]).y);
+    const radius = faceW * (+sens.value);
+
+    let minD = Infinity;
+    for (const hand of hands.landmarks || []) {
+      for (let k = 0; k < FINGERTIPS.length; k++) {
+        for (const idx of [FINGERTIPS[k], FINGER_DIP[k]]) {
+          const p = px(hand[idx]);
+          minD = Math.min(minD, Math.hypot(p.x - mc.x, p.y - mc.y));
+        }
+      }
+      if (draw) {
+        ctx.fillStyle = "#facc15";
+        for (const p of hand) { const q = px(p); ctx.beginPath(); ctx.arc(q.x, q.y, 4, 0, 7); ctx.fill(); }
+        ctx.fillStyle = "#f97316";
+        for (const i of FINGERTIPS) { const q = px(hand[i]); ctx.beginPath(); ctx.arc(q.x, q.y, 7, 0, 7); ctx.fill(); }
+      }
+    }
+    near = minD < radius;
+
+    if (draw) {
+      ctx.strokeStyle = near ? "#ef4444" : "#22c55e";
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(mc.x, mc.y, radius, 0, 7); ctx.stroke();
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.beginPath(); ctx.arc(mc.x, mc.y, 5, 0, 7); ctx.fill();
+    }
+    setStatus(near ? "Tay gần miệng!" : (hands.landmarks?.length ? "Ổn – tay ở xa miệng" : "Ổn – đang theo dõi"), near ? "danger" : "ok");
+  }
+
+  if (near) { nearStreak++; farStreak = 0; } else { farStreak++; nearStreak = 0; }
+  if (!alarmOn && nearStreak >= ON_FRAMES) setAlarm(true);
+  if (alarmOn && farStreak >= OFF_FRAMES) setAlarm(false);
+
+  fpsFrames++;
+  if (now - fpsT > 1000) { $("fps").textContent = fpsFrames; fpsFrames = 0; fpsT = now; }
+}
+
+$("startBtn").onclick = async () => {
+  const btn = $("startBtn");
+  btn.disabled = true;
+  initAudio(); audioCtx.resume();
+  try {
+    if (!faceLm) { setStatus("Đang tải mô hình AI…"); await loadModels(); }
+    setStatus("Đang mở camera…");
+    stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: "user" }, audio: false });
+    video.srcObject = stream;
+    await video.play();
+    running = true; lastVideoTime = -1;
+    $("stopBtn").disabled = false;
+    loop();
+  } catch (e) {
+    console.error(e);
+    setStatus("Lỗi: " + (e.name === "NotAllowedError" ? "chưa cho phép camera" : e.message), "danger");
+    btn.disabled = false;
+  }
+};
+
+$("stopBtn").onclick = () => {
+  running = false; cancelAnimationFrame(rafId);
+  stream?.getTracks().forEach((t) => t.stop());
+  video.srcObject = null;
+  setAlarm(false);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  setStatus("Đã dừng");
+  $("startBtn").disabled = false; $("stopBtn").disabled = true;
+};
+</script>
+</body>
+</html>
