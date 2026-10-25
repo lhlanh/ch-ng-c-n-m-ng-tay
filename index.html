@@ -176,7 +176,7 @@ const MOUTH = [13, 14, 61, 291, 0, 17];      // inner lips, corners, outer lips
 const ON_FRAMES = 4;    // frames in a row near mouth before alarm (avoids false triggers)
 const OFF_FRAMES = 6;   // frames in a row away before alarm stops
 
-let running = false, stream, rafId, lastVideoTime = -1;
+let running = false, stream, ticker, imageCapture, busy = false, lastTs = 0;
 let nearStreak = 0, farStreak = 0, alarmOn = false;
 let fpsFrames = 0, fpsT = performance.now();
 
@@ -194,17 +194,50 @@ function setAlarm(on) {
 
 function setStatus(text, cls) { statusEl.textContent = text; statusEl.className = "status " + (cls || ""); }
 
-function loop() {
-  if (!running) return;
-  rafId = requestAnimationFrame(loop);
-  if (video.readyState < 2 || video.currentTime === lastVideoTime) return;
-  lastVideoTime = video.currentTime;
+// requestAnimationFrame stops when the tab is hidden, and main-thread timers get throttled.
+// A Web Worker timer keeps ticking in the background, so detection keeps running.
+function startTicker() {
+  try {
+    const src = "setInterval(() => postMessage(0), 70)";
+    ticker = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+    ticker.onmessage = tick;
+    ticker.onerror = () => { ticker.terminate(); ticker = { terminate() { clearInterval(this.id) }, id: setInterval(tick, 70) }; };
+  } catch {
+    ticker = { terminate() { clearInterval(this.id) }, id: setInterval(tick, 70) };
+  }
+}
 
-  const now = performance.now();
-  const face = faceLm.detectForVideo(video, now);
-  const hands = handLm.detectForVideo(video, now);
+// Grab frames straight from the camera track: a hidden tab may stop updating the <video> element.
+async function grabFrame() {
+  if (imageCapture) {
+    try { return await imageCapture.grabFrame(); } catch {}
+  }
+  return video.readyState >= 2 ? video : null;
+}
 
-  if (canvas.width !== video.videoWidth) { canvas.width = video.videoWidth; canvas.height = video.videoHeight; }
+async function tick() {
+  if (!running || busy) return;
+  busy = true;
+  let frame;
+  try {
+    frame = await grabFrame();
+    if (frame && running) detect(frame);
+  } catch (e) {
+    console.error(e);
+  } finally {
+    if (frame && frame.close) frame.close();
+    busy = false;
+  }
+}
+
+function detect(frame) {
+  const now = Math.max(performance.now(), lastTs + 1);  // timestamps must strictly increase
+  lastTs = now;
+  const face = faceLm.detectForVideo(frame, now);
+  const hands = handLm.detectForVideo(frame, now);
+
+  const fw = frame.videoWidth || frame.width, fh = frame.videoHeight || frame.height;
+  if (canvas.width !== fw || canvas.height !== fh) { canvas.width = fw; canvas.height = fh; }
   const W = canvas.width, H = canvas.height;
   ctx.clearRect(0, 0, W, H);
   const draw = $("drawToggle").checked;
@@ -267,9 +300,10 @@ $("startBtn").onclick = async () => {
     stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: "user" }, audio: false });
     video.srcObject = stream;
     await video.play();
-    running = true; lastVideoTime = -1;
+    if ("ImageCapture" in window) imageCapture = new ImageCapture(stream.getVideoTracks()[0]);
+    running = true;
     $("stopBtn").disabled = false;
-    loop();
+    startTicker();
   } catch (e) {
     console.error(e);
     setStatus("Lỗi: " + (e.name === "NotAllowedError" ? "chưa cho phép camera" : e.message), "danger");
@@ -278,7 +312,8 @@ $("startBtn").onclick = async () => {
 };
 
 $("stopBtn").onclick = () => {
-  running = false; cancelAnimationFrame(rafId);
+  running = false;
+  ticker?.terminate(); ticker = null; imageCapture = null;
   stream?.getTracks().forEach((t) => t.stop());
   video.srcObject = null;
   setAlarm(false);
