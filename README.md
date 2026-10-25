@@ -14,6 +14,7 @@ Không cần cài gì thêm. Máy cần có **Internet** để tải mô hình A
 
 - **Độ nhạy**: kéo lên thì dễ báo động hơn, kéo xuống nếu bị báo nhầm (ví dụ khi chống cằm).
 - **Âm lượng**: chỉnh độ to của còi.
+- **Âm thanh báo động**: bấm **📁 Chọn file âm thanh** để dùng file mp3/wav của bạn (được nhớ cho lần sau), hoặc đặt file tên `alarm.mp3` cạnh `index.html`. Không có file thì dùng còi hú mặc định.
 - **Hiện điểm nhận diện**: hiện vòng tròn quanh miệng và các điểm trên tay.
 
 ## Quyền riêng tư

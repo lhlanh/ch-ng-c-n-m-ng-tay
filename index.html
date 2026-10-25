@@ -84,6 +84,12 @@
       <span>Âm lượng: <b id="volVal"></b></span>
       <input type="range" id="vol" min="0" max="1" step="0.05" value="1">
     </label>
+    <div class="row" style="grid-column: 1 / -1; font-size: 14px; color: var(--muted);">
+      Âm thanh báo động: <b id="soundName" style="color: var(--text);"></b>
+      <button type="button" class="secondary" onclick="document.getElementById('soundFile').click()">📁 Chọn file âm thanh</button>
+      <input type="file" id="soundFile" accept="audio/*" hidden>
+      <button type="button" id="soundReset" class="secondary">↺ Mặc định</button>
+    </div>
     <div class="stats" style="grid-column: 1 / -1;">
       <div><b id="count">0</b>lần bị bắt hôm nay</div>
       <div><b id="fps">–</b>FPS</div>
@@ -99,11 +105,12 @@ const video = $("video"), canvas = $("canvas"), ctx = canvas.getContext("2d");
 const stage = $("stage"), statusEl = $("status");
 
 let audioCtx, master, sirenOsc, sirenOsc2, lfo;
+const alarmAudio = new Audio();
 
 // ---------- Settings ----------
 const sens = $("sens"), vol = $("vol");
 const showSens = () => $("sensVal").textContent = (+sens.value).toFixed(2);
-const showVol = () => { $("volVal").textContent = Math.round(vol.value * 100) + "%"; if (master) master.gain.value = +vol.value; };
+const showVol = () => { $("volVal").textContent = Math.round(vol.value * 100) + "%"; if (master) master.gain.value = +vol.value; alarmAudio.volume = +vol.value; };
 sens.oninput = showSens; vol.oninput = showVol; showSens(); showVol();
 
 const todayKey = "nailbite-" + new Date().toISOString().slice(0, 10);
@@ -145,9 +152,62 @@ function stopSiren() {
   sirenOsc = sirenOsc2 = lfo = null;
 }
 
+// ---------- Custom alarm sound file (falls back to the siren) ----------
+// Priority: file picked on the page (remembered) > alarm.mp3 next to index.html > siren.
+alarmAudio.loop = true;
+let soundReady = false;
+alarmAudio.oncanplaythrough = () => { soundReady = true; };
+alarmAudio.onerror = () => {
+  soundReady = false;
+  if (!alarmAudio.src.endsWith("alarm.mp3")) { alarmAudio.src = "alarm.mp3"; return; }
+  $("soundName").textContent = "Còi hú (mặc định)";
+};
+let saved = null;
+try { saved = localStorage.getItem("nailbite-sound"); } catch {}
+if (saved) {
+  alarmAudio.src = saved;
+  $("soundName").textContent = localStorage.getItem("nailbite-sound-name") || "File đã chọn";
+} else {
+  alarmAudio.src = "alarm.mp3";
+  $("soundName").textContent = "alarm.mp3";
+}
+
+$("soundFile").onchange = (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    alarmAudio.src = reader.result;
+    $("soundName").textContent = f.name;
+    try {
+      localStorage.setItem("nailbite-sound", reader.result);
+      localStorage.setItem("nailbite-sound-name", f.name);
+    } catch { $("soundName").textContent = f.name + " (file lớn, không lưu được cho lần sau)"; }
+  };
+  reader.readAsDataURL(f);
+};
+$("soundReset").onclick = () => {
+  try { localStorage.removeItem("nailbite-sound"); localStorage.removeItem("nailbite-sound-name"); } catch {}
+  $("soundFile").value = "";
+  alarmAudio.src = "alarm.mp3";
+  $("soundName").textContent = "alarm.mp3";
+};
+
+function startAlarmSound() {
+  if (soundReady) {
+    alarmAudio.volume = +vol.value;
+    alarmAudio.currentTime = 0;
+    alarmAudio.play().catch(startSiren);
+  } else startSiren();
+}
+function stopAlarmSound() {
+  alarmAudio.pause();
+  stopSiren();
+}
+
 $("testBtn").onclick = () => {
-  startSiren();
-  setTimeout(() => { if (!alarmOn) stopSiren(); }, 1000);
+  startAlarmSound();
+  setTimeout(() => { if (!alarmOn) stopAlarmSound(); }, 2000);
 };
 
 // ---------- Models ----------
@@ -186,10 +246,10 @@ function setAlarm(on) {
   document.body.classList.toggle("alarm", on);
   stage.classList.toggle("alarm", on);
   if (on) {
-    startSiren();
+    startAlarmSound();
     count++; $("count").textContent = count;
     try { localStorage.setItem(todayKey, count); } catch {}
-  } else stopSiren();
+  } else stopAlarmSound();
 }
 
 function setStatus(text, cls) { statusEl.textContent = text; statusEl.className = "status " + (cls || ""); }
